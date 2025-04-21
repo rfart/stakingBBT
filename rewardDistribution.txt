@@ -1,0 +1,24 @@
+rewardPerToken Function Math Explanation
+The rewardPerToken function calculates how many reward tokens are earned per staked token over time. Here's the mathematical logic:
+
+The Formula
+```
+rewardPerTokenStored + (((block.timestamp - lastUpdateTime) * rewardRate * 1e8) / totalStaked)
+```
+Breakdown
+Base Concept: This function tracks accumulated rewards per single staked token.
+
+Components:
+
+rewardPerTokenStored: Previously accumulated rewards per token
+block.timestamp - lastUpdateTime: Time elapsed (in seconds) since last update
+rewardRate: Rate of reward distribution (tokens per second)
+totalStaked: Total amount of tokens staked in the contract
+1e8: Scaling factor (10^8) to handle decimal precision
+Calculation Process:
+
+First calculates new rewards generated since last update: (block.timestamp - lastUpdateTime) * rewardRate
+Scales by 10^8 for decimal precision
+Divides by totalStaked to get per-token amount
+Adds to the previous accumulated rewards
+Edge Case: If totalStaked = 0, returns previous value to avoid division by zero
