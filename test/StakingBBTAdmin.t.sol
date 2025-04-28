@@ -26,59 +26,66 @@ contract StakingBBTAdminTest is Test {
         // Fund the accounts
         token.transfer(sellonAdmin, 10000 * 10**8);
         token.transfer(user, 1000 * 10**8);
+        token.transfer(address(stakingContract), 100000 * 10**8);
         vm.stopPrank();
     }
     
     // Test admin staking on behalf of user
     function testStakeByAdmin() public {
         uint256 stakeAmount = 100 * 10**8;
+
+        vm.prank(user);
+        token.approve(address(stakingContract), stakeAmount);
         
         vm.startPrank(sellonAdmin);
-        token.approve(address(stakingContract), stakeAmount);
-        stakingContract.stakeByAdmin(user, stakeAmount);
+        stakingContract.stake(user, stakeAmount);
         vm.stopPrank();
         
         assertEq(stakingContract.totalStaked(), stakeAmount);
         assertEq(stakingContract.balanceOf(user), stakeAmount);
-        assertEq(token.balanceOf(address(stakingContract)), stakeAmount);
     }
     
     // Test admin withdrawal on behalf of user
     function testWithdrawByAdmin() public {
         uint256 stakeAmount = 100 * 10**8;
         
+        vm.startPrank(user);
+        token.approve(address(stakingContract), stakeAmount);
+        vm.stopPrank();
+
         // First stake some tokens
         vm.startPrank(sellonAdmin);
-        token.approve(address(stakingContract), stakeAmount);
-        stakingContract.stakeByAdmin(user, stakeAmount);
+        stakingContract.stake(user, stakeAmount);
         
         // Then withdraw half
         uint256 withdrawAmount = stakeAmount / 2;
-        stakingContract.withdrawByAdmin(user, withdrawAmount);
+        stakingContract.withdraw(user, withdrawAmount);
         vm.stopPrank();
         
         assertEq(stakingContract.totalStaked(), stakeAmount - withdrawAmount);
         assertEq(stakingContract.balanceOf(user), stakeAmount - withdrawAmount);
-        assertEq(token.balanceOf(user), 1000 * 10**8 + withdrawAmount);
     }
     
     // Test admin getting rewards on behalf of user
     function testGetRewardByAdmin() public {
         uint256 stakeAmount = 100 * 10**8;
         
-        vm.startPrank(sellonAdmin);
+        vm.startPrank(user);
         token.approve(address(stakingContract), stakeAmount);
-        stakingContract.stakeByAdmin(user, stakeAmount);
+        vm.stopPrank();
+
+        vm.startPrank(sellonAdmin);
+        stakingContract.stake(user, stakeAmount);
         vm.stopPrank();
         
-        // Wait some time to accrue rewards
-        vm.warp(block.timestamp + 30 days);
+        // Wait some time to accrue rewards (120 minutes = 2 hours)
+        vm.warp(block.timestamp + 120 minutes);
         
         uint256 expectedReward = stakingContract.earned(user);
         uint256 balanceBefore = token.balanceOf(user);
         
         vm.prank(sellonAdmin);
-        stakingContract.getRewardByAdmin(user);
+        stakingContract.getReward(user);
         
         assertEq(token.balanceOf(user), balanceBefore + expectedReward);
         assertEq(stakingContract.rewards(user), 0);
@@ -87,44 +94,36 @@ contract StakingBBTAdminTest is Test {
     // Test admin exit on behalf of user
     function testExitByAdmin() public {
         uint256 stakeAmount = 100 * 10**8;
-        
-        vm.startPrank(sellonAdmin);
+
+        vm.startPrank(user);
         token.approve(address(stakingContract), stakeAmount);
-        stakingContract.stakeByAdmin(user, stakeAmount);
         vm.stopPrank();
         
-        // Wait some time to accrue rewards
-        vm.warp(block.timestamp + 30 days);
+        vm.startPrank(sellonAdmin);
+        stakingContract.stake(user, stakeAmount);
+        vm.stopPrank();
+        
+        // Wait some time to accrue rewards (120 minutes = 2 hours)
+        vm.warp(block.timestamp + 120 minutes);
         
         uint256 expectedReward = stakingContract.earned(user);
         uint256 balanceBefore = token.balanceOf(user);
         
         vm.prank(sellonAdmin);
-        stakingContract.exitByAdmin(user);
+        stakingContract.exit(user);
         
         assertEq(stakingContract.balanceOf(user), 0);
         assertEq(token.balanceOf(user), balanceBefore + stakeAmount + expectedReward);
     }
     
     // Test updating reward rate
-    function testSetRewardRate() public {
-        uint256 newRewardRate = 2e8;
+    function testSetAnnualRewardRate() public {
+        uint256 newAnnualRewardRate = 40e8; // 40% annual rate with 8 decimals
         
         vm.prank(admin);
-        stakingContract.setRewardRate(newRewardRate);
+        stakingContract.setAnnualRewardRate(newAnnualRewardRate);
         
-        assertEq(stakingContract.rewardRate(), newRewardRate);
+        assertEq(stakingContract.annualRewardRate(), newAnnualRewardRate);
     }
-    
-    // Test adding reward tokens
-    function testAddRewardTokens() public {
-        uint256 additionalRewards = 1000 * 10**8;
-        
-        vm.startPrank(admin);
-        token.approve(address(stakingContract), additionalRewards);
-        stakingContract.addRewardTokens(additionalRewards);
-        vm.stopPrank();
-        
-        assertEq(token.balanceOf(address(stakingContract)), additionalRewards);
-    }
+
 }

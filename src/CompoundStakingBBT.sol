@@ -6,11 +6,11 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
 
 /**
- * @title StakingBBT
- * @dev Contract for staking BBT tokens with fixed annual rewards
+ * @title CompoundStakingBBT
+ * @dev Contract for staking BBT tokens with compound interest rewards
  * @custom:security-contact security@example.com
  */
-contract StakingBBT is ReentrancyGuard, AccessControl {
+contract CompoundStakingBBT is ReentrancyGuard, AccessControl {
     IERC20 immutable public stakingToken;
     
     // Role definitions
@@ -34,6 +34,9 @@ contract StakingBBT is ReentrancyGuard, AccessControl {
     
     // User address => staked amount
     mapping(address => uint256) public balanceOf;
+    
+    // User address => virtual balance (including compounded rewards)
+    mapping(address => uint256) public virtualBalanceOf;
     
     // Constants for time calculations
     uint256 public constant MINUTES_PER_YEAR = 525600; // 60 * 24 * 365
@@ -63,6 +66,10 @@ contract StakingBBT is ReentrancyGuard, AccessControl {
         if (account != address(0)) {
             rewards[account] = earned(account);
             userLastUpdateMinute[account] = currentMinute;
+            // Update virtual balance when updating rewards
+            if (balanceOf[account] > 0) {
+                virtualBalanceOf[account] = calculateCompoundBalance(account);
+            }
         }
         
         lastUpdateMinute = currentMinute;
@@ -86,8 +93,44 @@ contract StakingBBT is ReentrancyGuard, AccessControl {
     }
 
     /**
+     * @notice Calculate the compound balance for an account
+     * @dev Uses the compound interest formula: P * (1 + r)^t
+     * @param account Address for which to calculate compound balance
+     * @return Compounded balance
+     */
+    function calculateCompoundBalance(address account) public view returns (uint256) {
+        uint256 currentMinute = getCurrentMinute();
+        uint256 lastUpdateMinuteForUser = userLastUpdateMinute[account];
+        
+        // If already updated this minute or no balance, return current virtual balance
+        if (currentMinute <= lastUpdateMinuteForUser || balanceOf[account] == 0) {
+            return virtualBalanceOf[account] == 0 ? balanceOf[account] : virtualBalanceOf[account];
+        }
+        
+        // Calculate minutes elapsed since last update
+        uint256 minutesElapsed = currentMinute - lastUpdateMinuteForUser;
+        
+        // Calculate per-minute rate (r) = (1 + annual_rate)^(1/MINUTES_PER_YEAR) - 1
+        // For small rates, we can approximate this using: r ≈ annual_rate / MINUTES_PER_YEAR
+        uint256 minuteRate = (annualRewardRate * DECIMAL_PRECISION) / MINUTES_PER_YEAR / DECIMAL_PRECISION;
+        
+        // Calculate compound multiplier: (1 + r)^t
+        // Use iterative approach for compound calculation
+        uint256 baseBalance = virtualBalanceOf[account] == 0 ? balanceOf[account] : virtualBalanceOf[account];
+        uint256 compoundBalance = baseBalance;
+        
+        // Apply the compound interest for each minute
+        for (uint256 i = 0; i < minutesElapsed; i++) {
+            uint256 interest = (compoundBalance * minuteRate) / DECIMAL_PRECISION;
+            compoundBalance += interest;
+        }
+        
+        return compoundBalance;
+    }
+
+    /**
      * @notice Calculate rewards earned for an account
-     * @dev Calculates time-based rewards using minute precision
+     * @dev Calculates compound interest rewards
      * @param account Address for which to calculate rewards
      * @return Amount of rewards earned
      */
@@ -96,25 +139,11 @@ contract StakingBBT is ReentrancyGuard, AccessControl {
             return rewards[account];
         }
         
-        uint256 currentMinute = getCurrentMinute();
-        uint256 lastUpdateMinuteForUser = userLastUpdateMinute[account];
+        uint256 compoundBalance = calculateCompoundBalance(account);
+        uint256 initialBalance = virtualBalanceOf[account] == 0 ? balanceOf[account] : virtualBalanceOf[account];
         
-        // If already updated this minute, return current rewards
-        if (currentMinute <= lastUpdateMinuteForUser) {
-            return rewards[account];
-        }
-        
-        // Calculate minutes elapsed since last update
-        uint256 minutesElapsed = currentMinute - lastUpdateMinuteForUser;
-        
-        // Calculate per-minute reward rate (annual rate divided by minutes in a year)
-        // Adjusted for 8 decimal precision
-        uint256 minuteRate = (annualRewardRate * DECIMAL_PRECISION) / MINUTES_PER_YEAR / DECIMAL_PRECISION;
-        
-        // Calculate new rewards (using 8 decimal precision)
-        uint256 newRewards = (balanceOf[account] * minuteRate * minutesElapsed) / DECIMAL_PRECISION;
-        
-        return rewards[account] + newRewards;
+        // The earned rewards are the difference between compound balance and initial balance
+        return rewards[account] + (compoundBalance - initialBalance);
     }
 
     /**
@@ -129,6 +158,13 @@ contract StakingBBT is ReentrancyGuard, AccessControl {
         unchecked {
             totalStaked += amount;
             balanceOf[user] += amount;
+            
+            // Update virtual balance with the newly staked amount
+            if (virtualBalanceOf[user] == 0) {
+                virtualBalanceOf[user] = balanceOf[user];
+            } else {
+                virtualBalanceOf[user] += amount;
+            }
         }
         
         stakingToken.transferFrom(user, address(this), amount);
@@ -155,10 +191,17 @@ contract StakingBBT is ReentrancyGuard, AccessControl {
         require(amount > 0, "Cannot withdraw 0");
         require(balanceOf[user] >= amount, "Not enough staked");
         
+        // Calculate what percentage of the balance is being withdrawn
+        uint256 withdrawRatio = (amount * DECIMAL_PRECISION) / balanceOf[user];
+        
+        // Reduce virtual balance proportionally
+        uint256 virtualAmountToReduce = (virtualBalanceOf[user] * withdrawRatio) / DECIMAL_PRECISION;
+        
         totalStaked -= amount;
 
-        unchecked{
+        unchecked {
             balanceOf[user] -= amount;
+            virtualBalanceOf[user] -= virtualAmountToReduce;
         }
         
         stakingToken.transfer(user, amount);

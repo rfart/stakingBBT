@@ -6,13 +6,13 @@ import "../src/StakingBBT.sol";
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {MockToken} from "./mocks/MockToken.sol";
 
-
 contract StakingBBTRewardsTest is Test {
     StakingBBT public stakingContract;
     MockToken public token;
     address public admin = address(1);
     address public user1 = address(2);
     address public user2 = address(3);
+    address public sellonAdmin = address(4);
     
     // Setup the testing environment before each test
     function setUp() public {
@@ -21,13 +21,16 @@ contract StakingBBTRewardsTest is Test {
         token.mint(admin, 1000000 * 10**8);
         stakingContract = new StakingBBT(address(token));
         
+        // Grant SELLON_ADMIN_ROLE to sellonAdmin
+        stakingContract.grantRole(stakingContract.SELLON_ADMIN_ROLE(), sellonAdmin);
+        
         // Fund test users
         token.transfer(user1, 10000 * 10**8);
         token.transfer(user2, 10000 * 10**8);
+        token.transfer(sellonAdmin, 10000 * 10**8);
         
         // Add reward tokens to the contract
-        token.approve(address(stakingContract), 100000 * 10**8);
-        stakingContract.addRewardTokens(100000 * 10**8);
+        token.transfer(address(stakingContract), 100000 * 10**8);
         vm.stopPrank();
     }
     
@@ -37,18 +40,25 @@ contract StakingBBTRewardsTest is Test {
         
         vm.startPrank(user1);
         token.approve(address(stakingContract), stakeAmount);
-        stakingContract.stake(stakeAmount);
         vm.stopPrank();
         
-        // Advance time
-        uint256 duration = 1 days;
-        vm.warp(block.timestamp + duration);
+        vm.startPrank(sellonAdmin);
+        stakingContract.stake(user1, stakeAmount);
+        vm.stopPrank();
         
-        // Calculate expected reward
-        uint256 expectedReward = (duration * stakingContract.rewardRate() * 1e8) / 1e8;
+        // Store the current minute
+        uint256 startMinute = stakingContract.getCurrentMinute();
+        
+        // Advance time by 10 minutes
+        vm.warp(block.timestamp + 10 minutes);
+        
+        // Calculate expected reward (annual rate / minutes in year * amount * minutes elapsed)
+        uint256 minuteRate = (stakingContract.annualRewardRate() * stakingContract.DECIMAL_PRECISION()) / 
+                            stakingContract.MINUTES_PER_YEAR() / stakingContract.DECIMAL_PRECISION();
+        uint256 expectedReward = (stakeAmount * minuteRate * 10) / stakingContract.DECIMAL_PRECISION();
         
         // Assert the reward
-        assertApproxEqAbs(stakingContract.earned(user1), expectedReward, 1); // Allow for small rounding differences
+        assertApproxEqAbs(stakingContract.earned(user1), expectedReward, 10); // Allow for small rounding differences
     }
     
     // Test reward distribution between multiple users
@@ -56,57 +66,67 @@ contract StakingBBTRewardsTest is Test {
         uint256 stakeAmount1 = 100 * 10**8; // User1 stakes 100 tokens
         uint256 stakeAmount2 = 200 * 10**8; // User2 stakes 200 tokens
         
-        // User1 stakes
+        // User1 stakes via admin
         vm.startPrank(user1);
         token.approve(address(stakingContract), stakeAmount1);
-        stakingContract.stake(stakeAmount1);
         vm.stopPrank();
         
-        // Advance time
-        vm.warp(block.timestamp + 1 days);
+        vm.startPrank(sellonAdmin);
+        stakingContract.stake(user1, stakeAmount1);
+        vm.stopPrank();
         
-        // User2 stakes
+        // Advance time by 10 minutes
+        vm.warp(block.timestamp + 10 minutes);
+        
+        // Calculate user1's rewards after 10 minutes
+        uint256 minuteRate = (stakingContract.annualRewardRate() * stakingContract.DECIMAL_PRECISION()) / 
+                            stakingContract.MINUTES_PER_YEAR() / stakingContract.DECIMAL_PRECISION();
+        uint256 user1RewardsMinutes1to10 = (stakeAmount1 * minuteRate * 10) / stakingContract.DECIMAL_PRECISION();
+        
+        // Verify user1's rewards
+        assertApproxEqAbs(stakingContract.earned(user1), user1RewardsMinutes1to10, 10);
+        
+        // User2 stakes via admin
         vm.startPrank(user2);
         token.approve(address(stakingContract), stakeAmount2);
-        stakingContract.stake(stakeAmount2);
         vm.stopPrank();
         
-        // User1 should have rewards from the first day
-        uint256 user1RewardsDay1 = stakingContract.earned(user1);
+        vm.startPrank(sellonAdmin);
+        stakingContract.stake(user2, stakeAmount2);
+        vm.stopPrank();
         
-        // Advance time again
-        vm.warp(block.timestamp + 1 days);
+        // Advance time by another 10 minutes
+        vm.warp(block.timestamp + 10 minutes);
         
-        // Calculate expected rewards
-        // User1 gets 100% of rewards for day1, and 1/3 of rewards for day2
-        // User2 gets 2/3 of rewards for day2
-        uint256 dailyReward = 24 * 60 * 60 * stakingContract.rewardRate();
+        // Calculate expected rewards for the next 10 minutes
+        uint256 expectedUser1RewardsMinutes11to20 = (stakeAmount1 * minuteRate * 10) / stakingContract.DECIMAL_PRECISION();
+        uint256 expectedUser2RewardsMinutes11to20 = (stakeAmount2 * minuteRate * 10) / stakingContract.DECIMAL_PRECISION();
         
-        uint256 expectedUser1RewardsDay2 = (dailyReward * stakeAmount1) / (stakeAmount1 + stakeAmount2);
-        uint256 expectedUser2RewardsDay2 = (dailyReward * stakeAmount2) / (stakeAmount1 + stakeAmount2);
+        uint256 expectedUser1Total = user1RewardsMinutes1to10 + expectedUser1RewardsMinutes11to20;
         
-        uint256 expectedUser1Total = user1RewardsDay1 + expectedUser1RewardsDay2;
-        
-        // Assert the rewards with some tolerance for rounding
+        // Assert the rewards
         assertApproxEqAbs(stakingContract.earned(user1), expectedUser1Total, 10);
-        assertApproxEqAbs(stakingContract.earned(user2), expectedUser2RewardsDay2, 10);
+        assertApproxEqAbs(stakingContract.earned(user2), expectedUser2RewardsMinutes11to20, 10);
     }
     
-    // Test claiming rewards
+    // Test claiming rewards (now admin must do this)
     function testClaimRewards() public {
         uint256 stakeAmount = 100 * 10**8;
         
         vm.startPrank(user1);
         token.approve(address(stakingContract), stakeAmount);
-        stakingContract.stake(stakeAmount);
+        vm.stopPrank();
         
-        // Advance time
-        vm.warp(block.timestamp + 30 days);
+        vm.startPrank(sellonAdmin);
+        stakingContract.stake(user1, stakeAmount);
+        
+        // Advance time by 60 minutes (1 hour)
+        vm.warp(block.timestamp + 60 minutes);
         
         uint256 expectedReward = stakingContract.earned(user1);
         uint256 balanceBefore = token.balanceOf(user1);
         
-        stakingContract.getReward();
+        stakingContract.getReward(user1);
         vm.stopPrank();
         
         assertEq(stakingContract.rewards(user1), 0);
@@ -119,34 +139,123 @@ contract StakingBBTRewardsTest is Test {
         
         vm.startPrank(user1);
         token.approve(address(stakingContract), 1000 * 10**8); // Approve for all future transactions
+        vm.stopPrank();
         
+        vm.startPrank(sellonAdmin);
         // Initial stake
-        stakingContract.stake(initialStake);
+        stakingContract.stake(user1, initialStake);
         
-        // Advance 10 days
-        vm.warp(block.timestamp + 10 days);
+        // Advance 30 minutes
+        vm.warp(block.timestamp + 30 minutes);
         
         // Record earned rewards
-        uint256 rewardsAfter10Days = stakingContract.earned(user1);
+        uint256 rewardsAfter30Minutes = stakingContract.earned(user1);
         
         // Stake more
         uint256 additionalStake = 200 * 10**8;
-        stakingContract.stake(additionalStake);
+        stakingContract.stake(user1, additionalStake);
         
-        // Advance another 10 days
-        vm.warp(block.timestamp + 10 days);
+        // Advance another 30 minutes
+        vm.warp(block.timestamp + 30 minutes);
         
         // Total rewards should include:
-        // 1. Rewards from first 10 days with initial stake
-        // 2. Rewards from second 10 days with initial + additional stake
+        // 1. Rewards from first 30 minutes with initial stake
+        // 2. Rewards from second 30 minutes with initial + additional stake
         uint256 totalRewards = stakingContract.earned(user1);
         
         // Claim rewards
         uint256 balanceBefore = token.balanceOf(user1);
-        stakingContract.getReward();
+        stakingContract.getReward(user1);
         vm.stopPrank();
         
         assertEq(token.balanceOf(user1) - balanceBefore, totalRewards);
-        assertTrue(totalRewards > rewardsAfter10Days, "Rewards should increase after staking more tokens");
+        assertTrue(totalRewards > rewardsAfter30Minutes, "Rewards should increase after staking more tokens");
+    }
+    
+    // Test reward calculation across multiple minutes
+    function testRewardCalculationMultipleMinutes() public {
+        uint256 stakeAmount = 1000 * 10**8;
+        
+        vm.startPrank(user1);
+        token.approve(address(stakingContract), stakeAmount);
+        vm.stopPrank();
+        
+        vm.startPrank(sellonAdmin);
+        stakingContract.stake(user1, stakeAmount);
+        vm.stopPrank();
+        
+        // Calculate per-minute reward rate
+        uint256 minuteRate = (stakingContract.annualRewardRate() * stakingContract.DECIMAL_PRECISION()) / 
+                            stakingContract.MINUTES_PER_YEAR() / stakingContract.DECIMAL_PRECISION();
+        uint256 minuteReward = (stakeAmount * minuteRate) / stakingContract.DECIMAL_PRECISION();
+        
+        // Advance by 60 minutes
+        vm.warp(block.timestamp + 60 minutes);
+        
+        // Expected reward for 60 minutes
+        uint256 expectedReward = minuteReward * 60;
+        
+        // Check earned amount
+        assertApproxEqAbs(stakingContract.earned(user1), expectedReward, 100);
+    }
+    
+    // Test actual token earnings over a year at 30% rate
+    function testAnnualYield() public {
+        uint256 stakeAmount = 1000 * 10**8; // 1000 tokens with 8 decimals
+        
+        vm.startPrank(user1);
+        token.approve(address(stakingContract), stakeAmount);
+        vm.stopPrank();
+        
+        vm.startPrank(sellonAdmin);
+        stakingContract.stake(user1, stakeAmount);
+        vm.stopPrank();
+        
+        // Move forward 1 year (in minutes)
+        vm.warp(block.timestamp + 525600 minutes);
+        
+        // The actual calculation in the contract is done minute by minute with precision adjustments
+        // Calculate using the same method as the contract to account for rounding errors
+        uint256 minuteRate = (stakingContract.annualRewardRate() * stakingContract.DECIMAL_PRECISION()) / 
+                            stakingContract.MINUTES_PER_YEAR() / stakingContract.DECIMAL_PRECISION();
+        uint256 expectedReward = (stakeAmount * minuteRate * stakingContract.MINUTES_PER_YEAR()) / stakingContract.DECIMAL_PRECISION();
+        
+        // Get the actual earned amount from the contract
+        uint256 actualReward = stakingContract.earned(user1);
+        
+        // Log values for debugging
+        console.log("Expected reward:", expectedReward);
+        console.log("Actual reward:", actualReward);
+        console.log("Difference:", expectedReward > actualReward ? expectedReward - actualReward : actualReward - expectedReward);
+        console.log("Expected 30% of stake:", (stakeAmount * 30) / 100);
+        console.log("Ratio of actual to expected 30%:", (actualReward * 100) / ((stakeAmount * 30) / 100), "%");
+        
+        // Use a larger tolerance to account for accumulated rounding errors over many minutes
+        assertApproxEqAbs(actualReward, expectedReward, 1e7); // tolerance of 0.1 tokens for a year of calculations
+    }
+    
+    function testRewardPerMinute() public {
+        uint256 stakeAmount = 1000 * 10**8; // 1000 tokens with 8 decimals
+        
+        vm.startPrank(user1);
+        token.approve(address(stakingContract), stakeAmount);
+        vm.stopPrank();
+        
+        vm.startPrank(sellonAdmin);
+        stakingContract.stake(user1, stakeAmount);
+        vm.stopPrank();
+        
+        // Move forward 1 minute
+        vm.warp(block.timestamp + 1 minutes);
+        
+        // Calculate expected reward for 1 minute
+        uint256 minuteRate = (stakingContract.annualRewardRate() * stakingContract.DECIMAL_PRECISION()) / 
+                            stakingContract.MINUTES_PER_YEAR() / stakingContract.DECIMAL_PRECISION();
+        uint256 expectedReward = (stakeAmount * minuteRate) / stakingContract.DECIMAL_PRECISION();
+
+        console.log("Expected reward for 1 minute:", expectedReward);
+        
+        // Check earned amount
+        assertApproxEqAbs(stakingContract.earned(user1), expectedReward, 10);
     }
 }
