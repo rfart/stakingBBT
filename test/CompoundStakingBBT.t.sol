@@ -31,6 +31,8 @@ contract CompoundStakingBBTTest is Test {
     event Staked(address indexed user, uint256 amount);
     event Withdrawn(address indexed user, uint256 amount);
     event RewardPaid(address indexed user, uint256 reward);
+    event WithdrawalRequested(address indexed user, uint256 amount, uint256 unlockTime);
+    event WaitTimeUpdated(uint256 newWaitTime);
     
     function setUp() public {
         // Deploy token and staking contract
@@ -113,7 +115,6 @@ contract CompoundStakingBBTTest is Test {
     
     function testWithdraw() public {
         uint256 stakeAmount = 1_000 * 10**8; // 1,000 tokens
-        uint256 withdrawAmount = 400 * 10**8; // 400 tokens
         
         // Setup: user1 stakes tokens
         vm.startPrank(user1);
@@ -128,29 +129,167 @@ contract CompoundStakingBBTTest is Test {
         
         // Record virtual balance before withdrawal
         uint256 virtualBalanceBefore = staking.virtualBalanceOf(user1);
+        uint256 tokenBalanceBefore = token.balanceOf(user1);
         
-        // Withdraw partial amount
+        // Withdraw all tokens (now this withdraws everything)
         vm.prank(admin);
         vm.expectEmit(true, false, false, true);
-        emit Withdrawn(user1, withdrawAmount);
-        staking.withdraw(user1, withdrawAmount);
-        
-        // Calculate expected remaining percentage (60% of original stake)
-        uint256 expectedRemainingPercentage = 60 * 1e8; // 60% scaled by 1e8
+        emit Withdrawn(user1, stakeAmount);
+        staking.withdraw(user1);
         
         // Check actual balances
-        assertEq(staking.balanceOf(user1), stakeAmount - withdrawAmount, "Staked balance should be reduced by withdraw amount");
-        assertEq(staking.totalStaked(), stakeAmount - withdrawAmount, "Total staked should be reduced by withdraw amount");
-        
-        // Check virtual balance has been reduced proportionally
-        uint256 virtualBalanceAfter = staking.virtualBalanceOf(user1);
-        uint256 expectedVirtualBalance = (virtualBalanceBefore * expectedRemainingPercentage) / 100e8;
-        
-        // Allow for minimal rounding errors
-        assertApproxEqRel(virtualBalanceAfter, expectedVirtualBalance, 1e15); // 0.1% tolerance
+        assertEq(staking.balanceOf(user1), 0, "Staked balance should be 0 after withdrawal");
+        assertEq(staking.totalStaked(), 0, "Total staked should be 0 after withdrawal");
+        assertEq(staking.virtualBalanceOf(user1), 0, "Virtual balance should be 0 after withdrawal");
         
         // Check token balances
-        assertEq(token.balanceOf(user1), INITIAL_BALANCE - stakeAmount + withdrawAmount);
+        assertEq(token.balanceOf(user1), tokenBalanceBefore + stakeAmount, "User should receive full staked amount");
+    }
+    
+    function testWithdrawalWithWaitPeriod() public {
+        uint256 stakeAmount = 1_000 * 10**8; // 1,000 tokens
+        
+        // Setup: user1 stakes tokens
+        vm.startPrank(user1);
+        token.approve(address(staking), stakeAmount);
+        vm.stopPrank();
+        
+        vm.prank(admin);
+        staking.stake(user1, stakeAmount);
+        
+        // Warp forward to accumulate some rewards
+        vm.warp(block.timestamp + 30 days);
+        
+        // Record state before withdrawal request
+        uint256 virtualBalanceBefore = staking.virtualBalanceOf(user1);
+        uint256 rewardsBefore = staking.earned(user1);
+        uint256 tokenBalanceBefore = token.balanceOf(user1);
+        
+        console.log("Virtual balance before withdrawal request:", virtualBalanceBefore);
+        console.log("Rewards before withdrawal request:", rewardsBefore);
+        
+        // Request withdrawal
+        uint256 waitTime = staking.waitTime();
+        uint256 unlockTime = block.timestamp + waitTime;
+        
+        vm.prank(admin);
+        vm.expectEmit(true, false, false, true);
+        emit WithdrawalRequested(user1, stakeAmount, unlockTime);
+        staking.requestWithdrawal(user1);
+        
+        // Check withdrawal request was recorded
+        assertEq(staking.withdrawalRequests(user1), block.timestamp, "Withdrawal request timestamp should be recorded");
+        assertEq(staking.withdrawalAmounts(user1), stakeAmount, "Withdrawal amount should be full staked amount");
+        
+        // No rewards should accumulate during waiting period
+        vm.warp(block.timestamp + waitTime / 2); // Halfway through waiting period
+        
+        uint256 rewardsDuringWaiting = staking.earned(user1);
+        assertEq(rewardsDuringWaiting, rewardsBefore, "No additional rewards should accumulate during waiting period");
+        
+        // Attempt to complete withdrawal before wait time (should fail)
+        vm.prank(admin);
+        vm.expectRevert("Waiting period not over");
+        staking.completeWithdrawal(user1);
+        
+        // Complete waiting period
+        vm.warp(block.timestamp + waitTime / 2); // Complete the full waiting period
+        
+        // Complete withdrawal
+        vm.prank(admin);
+        vm.expectEmit(true, false, false, true);
+        emit Withdrawn(user1, stakeAmount);
+        staking.completeWithdrawal(user1);
+        
+        // Check withdrawal was processed
+        assertEq(staking.balanceOf(user1), 0, "Staked balance should be 0 after withdrawal");
+        assertEq(staking.totalStaked(), 0, "Total staked should be 0 after withdrawal");
+        assertEq(staking.virtualBalanceOf(user1), 0, "Virtual balance should be 0 after withdrawal");
+        assertEq(staking.withdrawalRequests(user1), 0, "Withdrawal request should be cleared");
+        assertEq(staking.withdrawalAmounts(user1), 0, "Withdrawal amount should be cleared");
+        
+        // Check token balances
+        assertEq(token.balanceOf(user1), tokenBalanceBefore + stakeAmount, "User should receive full staked amount");
+    }
+    
+    function testCancelWithdrawal() public {
+        uint256 stakeAmount = 1_000 * 10**8; // 1,000 tokens
+        
+        // Setup: user1 stakes tokens
+        vm.startPrank(user1);
+        token.approve(address(staking), stakeAmount);
+        vm.stopPrank();
+        
+        vm.prank(admin);
+        staking.stake(user1, stakeAmount);
+        
+        // Record state before withdrawal request
+        uint256 virtualBalanceBefore = staking.virtualBalanceOf(user1);
+        uint256 rewardsBefore = staking.earned(user1);
+        
+        // Request withdrawal
+        vm.prank(admin);
+        staking.requestWithdrawal(user1);
+        
+        // Check withdrawal request was recorded
+        assertEq(staking.withdrawalRequests(user1), block.timestamp, "Withdrawal request timestamp should be recorded");
+        
+        // Warp forward during waiting period
+        vm.warp(block.timestamp + staking.waitTime() / 2);
+        
+        // Cancel withdrawal
+        vm.prank(admin);
+        staking.cancelWithdrawal(user1);
+        
+        // Check withdrawal request was cleared
+        assertEq(staking.withdrawalRequests(user1), 0, "Withdrawal request should be cleared after cancellation");
+        assertEq(staking.withdrawalAmounts(user1), 0, "Withdrawal amount should be cleared after cancellation");
+        
+        // Warp forward more time and check that rewards start accumulating again
+        vm.warp(block.timestamp + 1 days);
+        
+        uint256 rewardsAfterCancel = staking.earned(user1);
+        assertTrue(rewardsAfterCancel > rewardsBefore, "Rewards should accumulate again after cancellation");
+    }
+    
+    function testWithdrawDisallowedDuringPendingRequest() public {
+        uint256 stakeAmount = 1_000 * 10**8; // 1,000 tokens
+        
+        // Setup: user1 stakes tokens
+        vm.startPrank(user1);
+        token.approve(address(staking), stakeAmount);
+        vm.stopPrank();
+        
+        vm.prank(admin);
+        staking.stake(user1, stakeAmount);
+        
+        // Request withdrawal
+        vm.prank(admin);
+        staking.requestWithdrawal(user1);
+        
+        // Attempt to withdraw normally (should fail)
+        vm.prank(admin);
+        vm.expectRevert("Withdrawal request pending, use completeWithdrawal");
+        staking.withdraw(user1);
+    }
+    
+    function testSetWaitTime() public {
+        uint256 newWaitTime = 2 days;
+        
+        vm.prank(admin);
+        vm.expectEmit(false, false, false, true);
+        emit WaitTimeUpdated(newWaitTime);
+        staking.setWaitTime(newWaitTime);
+        
+        assertEq(staking.waitTime(), newWaitTime, "Wait time should be updated");
+    }
+    
+    function testOnlyAdminCanSetWaitTime() public {
+        uint256 newWaitTime = 2 days;
+        
+        vm.expectRevert();
+        vm.prank(user1);
+        staking.setWaitTime(newWaitTime);
     }
     
     function testGetReward() public {
@@ -562,5 +701,215 @@ contract CompoundStakingBBTTest is Test {
         // 1. Double the staked amount (1000 vs 500)
         // 2. Compounding on a larger base (includes first period rewards)
         assertTrue(totalRewards > rewardsAfterFirstPeriod * 2, "Total rewards should be more than double first period rewards");
+    }
+
+    // Test partial reward claiming
+    function testPartialRewardClaiming() public {
+        uint256 stakeAmount = 1_000 * 10**8; // 1,000 tokens
+        
+        // Setup: user1 stakes tokens
+        vm.startPrank(user1);
+        token.approve(address(staking), stakeAmount);
+        vm.stopPrank();
+        
+        vm.prank(admin);
+        staking.stake(user1, stakeAmount);
+        
+        // Warp forward 30 days to accumulate rewards
+        vm.warp(block.timestamp + 30 days);
+        
+        // Calculate earned rewards
+        uint256 earnedRewards = staking.earned(user1);
+        assertTrue(earnedRewards > 0, "Should have earned rewards after 30 days");
+        
+        // Claim half of the rewards
+        uint256 halfRewards = earnedRewards / 2;
+        uint256 initialTokenBalance = token.balanceOf(user1);
+        uint256 initialVirtualBalance = staking.virtualBalanceOf(user1);
+        
+        console.log("Initial virtual balance:", initialVirtualBalance);
+        console.log("Total earned rewards:", earnedRewards);
+        console.log("Claiming half rewards:", halfRewards);
+        
+        vm.prank(admin);
+        staking.getReward(user1, halfRewards);
+        
+        // Verify half of rewards were claimed
+        uint256 remainingRewards = staking.rewards(user1);
+        assertApproxEqAbs(remainingRewards, earnedRewards - halfRewards, 1, "Half of rewards should remain");
+        
+        // Verify token balance increased by half rewards
+        assertApproxEqAbs(token.balanceOf(user1), initialTokenBalance + halfRewards, 1);
+        
+        // Verify virtual balance was updated correctly
+        uint256 newVirtualBalance = staking.virtualBalanceOf(user1);
+        assertTrue(newVirtualBalance > initialVirtualBalance, "Virtual balance should update after partial claim");
+        console.log("Updated virtual balance:", newVirtualBalance);
+        
+        // Warp forward another day
+        vm.warp(block.timestamp + 1 days);
+        
+        // Make sure new rewards are being earned based on the updated virtual balance
+        uint256 newRewards = staking.earned(user1);
+        assertTrue(newRewards > remainingRewards, "Should earn new rewards after partial claim");
+        console.log("New total rewards after 1 more day:", newRewards);
+        
+        // Claim all remaining rewards
+        vm.prank(admin);
+        staking.getReward(user1, newRewards);
+        
+        // Verify all rewards were claimed
+        assertEq(staking.rewards(user1), 0, "No rewards should remain after claiming all");
+    }
+    
+    // Test emergency withdrawal
+    function testEmergencyWithdraw() public {
+        uint256 stakeAmount = 1_000 * 10**8; // 1,000 tokens
+        uint256 excessTokens = 500 * 10**8; // 500 extra tokens
+        
+        // Setup: user1 stakes tokens
+        vm.startPrank(user1);
+        token.approve(address(staking), stakeAmount);
+        vm.stopPrank();
+        
+        vm.prank(admin);
+        staking.stake(user1, stakeAmount);
+        
+        // Send additional tokens to contract (not part of staking)
+        vm.prank(admin);
+        token.transfer(address(staking), excessTokens);
+        
+        // Check contract balance vs total staked
+        uint256 contractBalance = token.balanceOf(address(staking));
+        uint256 availableBalance = staking.getContractBalance();
+        
+        assertEq(contractBalance, stakeAmount + excessTokens, "Contract balance should include staked + excess tokens");
+        assertEq(availableBalance, excessTokens, "Available balance should only include excess tokens");
+        
+        // Emergency withdraw excess tokens
+        vm.prank(admin);
+        staking.emergencyWithdraw(excessTokens, admin, false);
+        
+        // Verify excess tokens were withdrawn
+        assertEq(token.balanceOf(admin), excessTokens, "Admin should receive excess tokens");
+        assertEq(staking.getContractBalance(), 0, "No excess tokens should remain");
+        
+        // Verify staked tokens remain untouched
+        assertEq(staking.totalStaked(), stakeAmount, "Staked tokens should remain untouched");
+        assertEq(staking.balanceOf(user1), stakeAmount, "User's staked balance should remain untouched");
+    }
+    
+    // Test emergency withdraw with force flag
+    function testEmergencyWithdrawWithForce() public {
+        uint256 stakeAmount = 1_000 * 10**8; // 1,000 tokens
+        
+        // Setup: user1 stakes tokens
+        vm.startPrank(user1);
+        token.approve(address(staking), stakeAmount);
+        vm.stopPrank();
+        
+        vm.prank(admin);
+        staking.stake(user1, stakeAmount);
+        
+        // Attempt to withdraw more than available (should fail)
+        vm.prank(admin);
+        vm.expectRevert("Insufficient available balance");
+        staking.emergencyWithdraw(stakeAmount, admin, false);
+        
+        // Use force flag to withdraw staked tokens
+        vm.prank(admin);
+        staking.emergencyWithdraw(stakeAmount, admin, true);
+        
+        // Verify tokens were withdrawn
+        assertEq(token.balanceOf(admin), stakeAmount, "Admin should receive tokens");
+        
+        // Note: totalStaked is still the same, which means the contract is now undercollateralized
+        assertEq(staking.totalStaked(), stakeAmount, "totalStaked remains unchanged");
+    }
+    
+    // Test zero address and zero amount checks for emergency withdrawal
+    function testEmergencyWithdrawChecks() public {
+        // Test zero address
+        vm.prank(admin);
+        vm.expectRevert("Cannot withdraw to zero address");
+        staking.emergencyWithdraw(100, address(0), false);
+        
+        // Test zero amount
+        vm.prank(admin);
+        vm.expectRevert("Cannot withdraw 0");
+        staking.emergencyWithdraw(0, admin, false);
+    }
+    
+    // Test getContractBalance
+    function testGetContractBalance() public {
+        uint256 stakeAmount = 1_000 * 10**8; // 1,000 tokens
+        uint256 extraAmount = 500 * 10**8; // 500 extra tokens
+        
+        // Setup: user1 stakes tokens
+        vm.startPrank(user1);
+        token.approve(address(staking), stakeAmount);
+        vm.stopPrank();
+        
+        vm.prank(admin);
+        staking.stake(user1, stakeAmount);
+        
+        // Initial contract balance should match staked amount
+        assertEq(staking.getContractBalance(), 0, "Available balance should be 0 initially");
+        
+        // Add extra tokens to the contract
+        vm.prank(admin);
+        token.transfer(address(staking), extraAmount);
+        
+        // Contract balance should now include the extra tokens
+        assertEq(staking.getContractBalance(), extraAmount, "Available balance should include extra tokens");
+        
+        // Warp forward and accumulate rewards
+        vm.warp(block.timestamp + 30 days);
+        
+        // Claim rewards - this should not affect the contract balance calculation
+        vm.prank(admin);
+        staking.getReward(user1, 0); // Claim all rewards
+        
+        // Contract balance should still match the extra amount
+        assertEq(staking.getContractBalance(), extraAmount, "Available balance should still be extra tokens");
+    }
+    
+    // Test getUserInfo view function
+    function testGetUserInfo() public {
+        uint256 stakeAmount = 1_000 * 10**8; // 1,000 tokens
+        
+        // Setup: user1 stakes tokens
+        vm.startPrank(user1);
+        token.approve(address(staking), stakeAmount);
+        vm.stopPrank();
+        
+        vm.prank(admin);
+        staking.stake(user1, stakeAmount);
+        
+        // Warp forward to accumulate rewards
+        vm.warp(block.timestamp + 30 days);
+        
+        // Get user info
+        (
+            uint256 _earned,
+            uint256 _stakedBalance,
+            uint256 _virtualBalance,
+            uint256 _lastUpdateMinute,
+            bool _hasWithdrawalRequest
+        ) = staking.getUserInfo(user1);
+        
+        // Verify returned values
+        assertEq(_earned, staking.earned(user1), "Earned value should match earned() function");
+        assertEq(_stakedBalance, staking.balanceOf(user1), "Staked balance should match balanceOf()");
+        assertEq(_virtualBalance, staking.virtualBalanceOf(user1), "Virtual balance should match virtualBalanceOf()");
+        assertEq(_lastUpdateMinute, staking.userLastUpdateMinute(user1), "Last update minute should match storage");
+        assertEq(_hasWithdrawalRequest, false, "User should not have a withdrawal request");
+        
+        // Request withdrawal and check again
+        vm.prank(admin);
+        staking.requestWithdrawal(user1);
+        
+        (,,,, _hasWithdrawalRequest) = staking.getUserInfo(user1);
+        assertTrue(_hasWithdrawalRequest, "User should have a withdrawal request");
     }
 }
