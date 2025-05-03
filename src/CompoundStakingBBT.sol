@@ -73,19 +73,18 @@ contract CompoundStakingBBT is ReentrancyGuard, AccessControl {
      * @param account The address for which to update rewards
      */
     modifier updateReward(address account) {
+        require(account != address(0), "Invalid address");
         uint256 currentMinute = getCurrentMinute();
-        
-        if (account != address(0)) {
-            rewards[account] = earned(account);
-            userLastUpdateMinute[account] = currentMinute;
-            // Update virtual balance when updating rewards
-            if (balanceOf[account] > 0) {
-                virtualBalanceOf[account] = calculateCompoundBalance(account);
-            }
+
+        rewards[account] = earned(account);
+        // Update virtual balance when updating rewards
+        if (balanceOf[account] > 0 && withdrawalRequests[account] == 0) {
+            virtualBalanceOf[account] = calculateCompoundBalance(account);
         }
-        
-        lastUpdateMinute = currentMinute;
+
         _;
+        userLastUpdateMinute[account] = currentMinute;
+        lastUpdateMinute = currentMinute;
     }
 
     /**
@@ -119,8 +118,7 @@ contract CompoundStakingBBT is ReentrancyGuard, AccessControl {
 
         uint256 baseBalance = accountVirtualBalance == 0 ? accountBalance : accountVirtualBalance;
 
-        // If already updated this minute or no balance, return current virtual balance
-        if (currentMinute <= lastUpdateMinuteForUser || accountBalance == 0) {
+        if (accountBalance == 0) {
             return baseBalance;
         }
         
@@ -191,6 +189,7 @@ contract CompoundStakingBBT is ReentrancyGuard, AccessControl {
      */
     function stake(address user, uint256 amount) external nonReentrant onlyRole(SELLON_ADMIN_ROLE) updateReward(user) {
         require(amount > 0, "Cannot stake 0");
+        require(withdrawalRequests[user] == 0, "Withdrawal request pending");
 
         unchecked {
             totalStaked += amount;
@@ -209,7 +208,7 @@ contract CompoundStakingBBT is ReentrancyGuard, AccessControl {
      * @param user Address requesting the withdrawal
      */
     function requestWithdrawal(address user) external nonReentrant onlyRole(SELLON_ADMIN_ROLE) updateReward(user) {
-        uint256 userBalance = balanceOf[user];
+        uint256 userBalance = virtualBalanceOf[user];
         require(userBalance > 0, "No tokens staked");
         require(withdrawalRequests[user] == 0, "Withdrawal already pending");
         
@@ -232,8 +231,9 @@ contract CompoundStakingBBT is ReentrancyGuard, AccessControl {
 
         uint256 amount = withdrawalAmounts[user];
         // Clear withdrawal request
-        withdrawalRequests[user] = 0;
-        withdrawalAmounts[user] = 0;
+        delete withdrawalRequests[user];
+        delete withdrawalAmounts[user];
+        
         
         // Process withdrawal
         _withdraw(user, amount);
@@ -248,20 +248,8 @@ contract CompoundStakingBBT is ReentrancyGuard, AccessControl {
         require(withdrawalRequests[user] > 0, "No withdrawal request");
         
         // Clear withdrawal request
-        withdrawalRequests[user] = 0;
-        withdrawalAmounts[user] = 0;
-    }
-
-    /**
-     * @notice Withdraw all staked tokens for a user
-     * @dev Can only be called by address with SELLON_ADMIN_ROLE
-     * @param user Address to withdraw tokens for
-     */
-    function withdraw(address user) public nonReentrant onlyRole(SELLON_ADMIN_ROLE) updateReward(user) {
-        require(withdrawalRequests[user] == 0, "Withdrawal request pending, use completeWithdrawal");
-        uint256 userBalance = balanceOf[user];
-        require(userBalance > 0, "No tokens staked");
-        _withdraw(user, userBalance);
+        delete withdrawalRequests[user];
+        delete withdrawalAmounts[user];
     }
 
     /**
@@ -271,12 +259,14 @@ contract CompoundStakingBBT is ReentrancyGuard, AccessControl {
      */
     function _withdraw(address user, uint256 amount) internal {
         require(amount > 0, "Cannot withdraw 0");
-        require(balanceOf[user] >= amount, "Not enough staked");
+        require(virtualBalanceOf[user] >= amount, "Not enough staked");
         
         // Since we're withdrawing everything, we can directly set virtual balance to 0
-        totalStaked -= amount;
-        balanceOf[user] = 0;
-        virtualBalanceOf[user] = 0;
+        totalStaked -= balanceOf[user];
+
+        delete balanceOf[user];
+        delete virtualBalanceOf[user];
+        delete rewards[user];
         
         stakingToken.transfer(user, amount);
         
@@ -300,17 +290,18 @@ contract CompoundStakingBBT is ReentrancyGuard, AccessControl {
      */
     function _getReward(address user, uint256 amount) internal {
         uint256 reward = rewards[user];
+
         if (reward > 0) {
             // If amount is 0 or greater than available rewards, claim all rewards
-            uint256 claimAmount = (amount == 0 || amount > reward) ? reward : amount;
-            
+            uint256 claimAmount = (amount > reward) ? reward : amount;
             // Update rewards balance
-            rewards[user] = reward - claimAmount;
+            rewards[user] -= claimAmount;
+            virtualBalanceOf[user] -= claimAmount;
+
             
             // When updating rewards partially, we need to ensure virtual balance is updated
             // to reflect the current compounded value for future calculations
             if (balanceOf[user] > 0) {
-                virtualBalanceOf[user] = calculateCompoundBalance(user);
             }
             
             stakingToken.transfer(user, claimAmount);
@@ -319,24 +310,11 @@ contract CompoundStakingBBT is ReentrancyGuard, AccessControl {
     }
 
     /**
-     * @notice Withdraw all staked tokens and rewards for a user
-     * @dev Can only be called by address with SELLON_ADMIN_ROLE
-     * @param user Address to exit staking for
-     */
-    function exit(address user) external nonReentrant onlyRole(SELLON_ADMIN_ROLE) updateReward(user) {
-        uint256 userBalance = balanceOf[user];
-        if (userBalance > 0) {
-            _withdraw(user, userBalance);
-        }
-        _getReward(user, 0); // Claim all rewards by passing 0
-    }
-
-    /**
      * @notice Update the annual reward rate
      * @dev Can only be called by address with ADMIN_ROLE
      * @param _annualRewardRate New annual reward rate (scaled by DECIMAL_PRECISION)
      */
-    function setAnnualRewardRate(uint256 _annualRewardRate) external onlyRole(ADMIN_ROLE) updateReward(address(0)) {
+    function setAnnualRewardRate(uint256 _annualRewardRate) external onlyRole(ADMIN_ROLE) {
         annualRewardRate = _annualRewardRate;
         emit AnnualRewardRateUpdated(_annualRewardRate);
     }

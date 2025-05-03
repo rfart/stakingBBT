@@ -3,7 +3,7 @@ pragma solidity 0.8.28;
 
 import "forge-std/Script.sol";
 import "../src/CompoundStakingBBT.sol";
-import "../test/CompoundStakingBBT.t.sol"; // Import to access MockBBT
+import "../test/mocks/MockToken.sol"; // Import to access MockBBT
 
 contract DeployWithMockTokenScript is Script {
     function run() public {
@@ -14,7 +14,7 @@ contract DeployWithMockTokenScript is Script {
         vm.startBroadcast(deployerPrivateKey);
         
         // Deploy the mock BBT token first
-        MockBBT mockToken = new MockBBT();
+        BbtToken mockToken = new BbtToken();
         
         // Deploy the CompoundStakingBBT contract
         CompoundStakingBBT stakingContract = new CompoundStakingBBT(address(mockToken));
