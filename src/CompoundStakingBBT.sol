@@ -4,13 +4,14 @@ pragma solidity 0.8.28;
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
+import "@openzeppelin/contracts/utils/Pausable.sol";
 
 /**
  * @title CompoundStakingBBT
  * @dev Contract for staking BBT tokens with compound interest rewards
  * @custom:security-contact security@example.com
  */
-contract CompoundStakingBBT is ReentrancyGuard, AccessControl {
+contract CompoundStakingBBT is ReentrancyGuard, AccessControl, Pausable {
     IERC20 immutable public stakingToken;
     
     // Role definitions
@@ -187,7 +188,7 @@ contract CompoundStakingBBT is ReentrancyGuard, AccessControl {
      * @param user Address that is staking the tokens
      * @param amount Amount of tokens to stake
      */
-    function stake(address user, uint256 amount) external nonReentrant onlyRole(SELLON_ADMIN_ROLE) updateReward(user) {
+    function stake(address user, uint256 amount) external nonReentrant onlyRole(SELLON_ADMIN_ROLE) whenNotPaused updateReward(user) {
         require(amount > 0, "Cannot stake 0");
         require(withdrawalRequests[user] == 0, "Withdrawal request pending");
 
@@ -207,7 +208,7 @@ contract CompoundStakingBBT is ReentrancyGuard, AccessControl {
      * @dev Initiates the withdrawal process with waiting period
      * @param user Address requesting the withdrawal
      */
-    function requestWithdrawal(address user) external nonReentrant onlyRole(SELLON_ADMIN_ROLE) updateReward(user) {
+    function requestWithdrawal(address user) external nonReentrant onlyRole(SELLON_ADMIN_ROLE) whenNotPaused updateReward(user) {
         uint256 userBalance = virtualBalanceOf[user];
         require(userBalance > 0, "No tokens staked");
         require(withdrawalRequests[user] == 0, "Withdrawal already pending");
@@ -225,7 +226,7 @@ contract CompoundStakingBBT is ReentrancyGuard, AccessControl {
      * @dev Can only be called after the waiting period has elapsed
      * @param user Address to complete withdrawal for
      */
-    function completeWithdrawal(address user) external nonReentrant onlyRole(SELLON_ADMIN_ROLE) updateReward(user) {
+    function completeWithdrawal(address user) external nonReentrant onlyRole(SELLON_ADMIN_ROLE) whenNotPaused updateReward(user) {
         require(withdrawalRequests[user] > 0, "No withdrawal request");
         require(block.timestamp >= withdrawalRequests[user] + waitTime, "Waiting period not over");
 
@@ -244,7 +245,7 @@ contract CompoundStakingBBT is ReentrancyGuard, AccessControl {
      * @dev Allows a user to cancel their withdrawal request
      * @param user Address to cancel withdrawal for
      */
-    function cancelWithdrawal(address user) external nonReentrant onlyRole(SELLON_ADMIN_ROLE) updateReward(user) {
+    function cancelWithdrawal(address user) external nonReentrant onlyRole(SELLON_ADMIN_ROLE) whenNotPaused updateReward(user) {
         require(withdrawalRequests[user] > 0, "No withdrawal request");
         
         // Clear withdrawal request
@@ -279,7 +280,7 @@ contract CompoundStakingBBT is ReentrancyGuard, AccessControl {
      * @param user Address to claim rewards for
      * @param amount Amount of rewards to claim, 0 for claiming all rewards
      */
-    function getReward(address user, uint256 amount) public nonReentrant onlyRole(SELLON_ADMIN_ROLE) updateReward(user) {
+    function getReward(address user, uint256 amount) public nonReentrant onlyRole(SELLON_ADMIN_ROLE) whenNotPaused updateReward(user) {
         _getReward(user, amount);
     }
 
@@ -330,12 +331,29 @@ contract CompoundStakingBBT is ReentrancyGuard, AccessControl {
     }
 
     /**
+     * @notice Pause the contract
+     * @dev Can only be called by address with ADMIN_ROLE
+     */
+    function pause() external onlyRole(ADMIN_ROLE) {
+        _pause();
+    }
+
+    /**
+     * @notice Unpause the contract
+     * @dev Can only be called by address with ADMIN_ROLE
+     */
+    function unpause() external onlyRole(ADMIN_ROLE) {
+        _unpause();
+    }
+
+    /**
      * @notice Emergency withdraw tokens that are not part of the staking pool
      * @dev Can only be called by address with ADMIN_ROLE
      * @param amount Amount of tokens to withdraw
      * @param recipient Address to send tokens to
      */
     function emergencyWithdraw(uint256 amount, address recipient, bool forceWithdraw) external nonReentrant onlyRole(ADMIN_ROLE) {
+        // Note: emergencyWithdraw can be called even when paused, as it's for emergency purposes
         require(recipient != address(0), "Cannot withdraw to zero address");
         require(amount > 0, "Cannot withdraw 0");
         
